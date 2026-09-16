@@ -1,317 +1,583 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""icecream_flavor 的离线单元测试（不访问网络）。"""
+"""ice_cream_flavor 的单元测试（标准库 unittest，无需第三方依赖）
 
-import builtins
+运行：
+    python -m unittest -v test_ice_cream_flavor
+
+核心要求是覆盖 5x5 = 25 种口味组合，另外覆盖命名变体、茶底干扰、
+翻页、接口异常等边界情况。全部离线，不发真实网络请求。
+
+可选的真实联网回归测试：
+    设置环境变量 ICECREAM_LIVE_TEST=1 后再运行即可。
+"""
+
 import contextlib
+import doctest
 import io
+import json
 import os
 import unittest
+import urllib.parse
 
-import icecream_flavor as icf
+import ice_cream_flavor as icf
+from ice_cream_flavor import (
+    AID_HUANYUAN,
+    AID_ZHUTU,
+    COMBINATION_COUNT,
+    FLAVOR_COMBINATIONS,
+    FLAVORS,
+    build_url,
+    count_combinations,
+    describe,
+    detect_flavors_from_name,
+    extract_flavors,
+    fetch_all_product_names,
+    find_combination,
+    format_line,
+    ice_cream_prefix,
+    query_both,
+    render_all_combinations,
+    render_combination,
+    validate_combinations,
+)
+
+# --------------------------------------------------------------------------
+# 测试素材：每种口味在各站点可能出现的商品名写法
+# --------------------------------------------------------------------------
+
+#: 交图创咖（主图）风格，取自 2026-09 的真实接口快照命名的规律
+ZHUTU_TEMPLATES = {
+    "香草": ["香草冰淇淋雪底拿铁", "香草冰淇淋雪底美式", "香草·筒甜",
+             "香草黑武士·筒甜", "香草雪底茉莉绿茶", "香草阿芙佳朵",
+             "香草旗杆圣代", "香草圣代", "香草吐冰"],
+    "草莓": ["草莓冰淇淋雪底拿铁", "草莓冰淇淋雪底美式", "草莓·筒甜",
+             "草莓黑武士·筒甜", "草莓雪底茉莉绿茶", "草莓阿芙佳朵",
+             "草莓旗杆圣代", "草莓圣代", "草莓吐冰"],
+    "抹茶": ["抹茶冰淇淋雪底拿铁", "抹茶冰淇淋雪底美式", "抹茶·筒甜",
+             "抹茶黑武士·筒甜", "抹茶雪底茉莉绿茶", "抹茶阿芙佳朵",
+             "抹茶旗杆圣代", "抹茶圣代", "抹茶吐冰"],
+    "巧克力": ["巧克力冰淇淋雪底拿铁", "巧克力冰淇淋雪底美式", "巧克力·筒甜",
+               "巧克力黑武士·筒甜", "巧克力雪底茉莉绿茶", "巧克力阿芙佳朵",
+               "巧克力旗杆圣代", "巧克力圣代", "巧克力吐冰"],
+    "茉莉乌龙": ["茉莉乌龙冰淇淋雪底拿铁", "茉莉乌龙冰淇淋雪底美式", "茉莉乌龙·筒甜",
+                 "茉莉乌龙黑武士·筒甜", "茉莉乌龙雪底茉莉绿茶", "茉莉乌龙阿芙佳朵",
+                 "茉莉乌龙旗杆圣代", "茉莉乌龙圣代", "茉莉乌龙吐冰"],
+}
+
+#: 交环创咖（环院）风格，多一个"味"字
+HUANYUAN_TEMPLATES = {
+    "香草": ["香草冰淇淋雪底拿铁", "香草冰淇淋雪底美式", "香草雪底红茶",
+             "香草味旗杆圣代", "香草味圣代", "香草味甜筒", "香草味阿芙佳朵",
+             "香草黑武士·筒甜", "香草·筒甜", "香草吐冰"],
+    "草莓": ["草莓冰淇淋雪底拿铁", "草莓冰淇淋雪底美式", "草莓雪底红茶",
+             "草莓味旗杆圣代", "草莓味圣代", "草莓味甜筒", "草莓味阿芙佳朵",
+             "草莓黑武士·筒甜", "草莓·筒甜", "草莓吐冰"],
+    "抹茶": ["抹茶冰淇淋雪底拿铁", "抹茶冰淇淋雪底美式", "抹茶雪底红茶",
+             "抹茶味旗杆圣代", "抹茶味圣代", "抹茶味甜筒", "抹茶味阿芙佳朵",
+             "抹茶黑武士·筒甜", "抹茶·筒甜", "抹茶吐冰"],
+    "巧克力": ["巧克力冰淇淋雪底拿铁", "巧克力冰淇淋雪底美式", "巧克力雪底红茶",
+               "巧克力味旗杆圣代", "巧克力味圣代", "巧克力味甜筒", "巧克力味阿芙佳朵",
+               "巧克力黑武士·筒甜", "巧克力·筒甜", "巧克力吐冰"],
+    "茉莉乌龙": ["茉莉乌龙冰淇淋雪底拿铁", "茉莉乌龙冰淇淋雪底美式", "茉莉乌龙雪底红茶",
+                 "茉莉乌龙味旗杆圣代", "茉莉乌龙味圣代", "茉莉乌龙味甜筒",
+                 "茉莉乌龙味阿芙佳朵", "茉莉乌龙黑武士·筒甜", "茉莉乌龙·筒甜",
+                 "茉莉乌龙吐冰"],
+}
+
+#: 真实存在的干扰商品：含口味词，但不是冰淇淋，必须全部忽略
+NOISE_PRODUCTS = [
+    # --- 香草 ---
+    "香草拿铁-PRO", "洱源·香草拿铁", "香草燕麦拿铁", "香草生椰拿铁",
+    "香草拿铁", "香草风味咖啡浓缩液",
+    # --- 草莓 ---
+    "草莓雪顶气泡水",
+    # --- 抹茶 ---
+    "抹茶拿铁-PRO", "抹茶拿铁", "燕麦抹茶拿铁", "生椰抹茶", "椰青抹茶",
+    "半熟芝士糕点（抹茶味）-1粒", "抹茶生巧", "牛奶抹茶绿豆沙",
+    # --- 巧克力 ---
+    "经典巧克力-PRO", "经典巧克力", "申浦酒心黑巧克力",
+    "申浦酒心巧克力-小粒约6.5g", "申浦酒心巧克力-大粒约15g",
+    "巧克力丹麦包-1个", "巧克力坚果脆", "申浦夜上海牛奶巧克力",
+    "迪拜巧克力风味开心果千层蛋糕",
+    # --- 茉莉乌龙 ---
+    "桂花乌龙炖桃胶", "优倍鲜奶茉莉绿茶", "鲜奶茉莉绿茶", "茉莉绿茶",
+    "芝士奶盖茉莉绿茶", "生椰茉莉绿茶", "燕麦茉莉绿茶",
+]
+
+#: 真实快照样本（2026-09 从接口实际抓到的名字）
+SNAPSHOT_ZHUTU = [
+    "回未幸运花酥·糕点", "纸杯", "豆浆绿茶", "BUFFTea全口味合集·交大伴手礼盒装",
+    "桂花乌龙炖桃胶", "经典巧克力-PRO", "抹茶拿铁-PRO", "香草拿铁-PRO",
+    "洱源·香草拿铁", "抹茶拿铁", "经典巧克力", "燕麦抹茶拿铁",
+    "香草燕麦拿铁", "生椰抹茶", "椰青抹茶", "香草生椰拿铁", "香草拿铁",
+    "香草风味咖啡浓缩液", "巧克力坚果脆", "茉莉绿茶",
+    "香草冰淇淋雪底拿铁", "香草冰淇淋雪底美式", "香草·筒甜",
+    "香草黑武士·筒甜", "香草雪底茉莉绿茶", "香草阿芙佳朵",
+    "香草旗杆圣代", "香草圣代", "香草吐冰",
+]
+SNAPSHOT_HUANYUAN = [
+    "抹茶生巧", "牛奶抹茶绿豆沙", "桂花乌龙炖桃胶", "半熟芝士糕点（抹茶味）-1粒",
+    "抹茶拿铁-PRO", "抹茶拿铁", "燕麦抹茶拿铁", "生椰抹茶", "冰椰抹茶",
+    "经典巧克力-PRO", "巧克力坚果脆", "茉莉绿茶", "鲜奶祁门红茶",
+    "草莓雪底红茶", "草莓冰淇淋雪底拿铁", "草莓冰淇淋雪底美式",
+    "草莓雪底茉莉绿茶", "草莓黑武士·筒甜", "草莓·筒甜",
+    "草莓味旗杆圣代", "黑武士·草莓味甜筒", "草莓味圣代", "草莓味甜筒",
+    "草莓味阿芙佳朵", "草莓吐冰",
+]
 
 
-def p(name):
-    return {"name": name}
+# --------------------------------------------------------------------------
+# 测试用的假接口
+# --------------------------------------------------------------------------
+
+def make_opener(datasets, calls=None):
+    """构造一个假的接口实现。
+
+    ``datasets``：{aid: [商品名, ...]}，超过 200 条会自动分页。
+    ``calls``：可选列表，记录每次请求的 (aid, page)，用于验证翻页。
+    """
+    def opener(url, timeout=None):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        aid = int(query["aid"][0])
+        page = int(query["page"][0])
+        limit = int(query["limit"][0])
+        if calls is not None:
+            calls.append((aid, page))
+        items = datasets.get(aid, [])
+        chunk = items[(page - 1) * limit: page * limit]
+        return {"code": 0, "dataList": [{"name": n} for n in chunk]}
+
+    return opener
 
 
-class TestDetectFlavors(unittest.TestCase):
-    def test_main_library_vanilla(self):
-        products = [p(n) for n in (
-            "香草冰淇淋雪底拿铁", "香草冰淇淋雪底美式", "香草·筒甜",
-            "香草黑武士·筒甜", "香草雪底茉莉绿茶", "香草阿芙佳朵",
-            "香草旗杆圣代", "香草圣代", "香草吐冰",
-            "拿铁咖啡", "美式", "烤吐司", "厚切培根芝士卷",
-        )]
-        info = icf.detect_flavors(products)
-        self.assertEqual(info["flavors"], ["香草"])
-        self.assertEqual(len(info["items"]), 9)
+class IceCreamFlavorTest(unittest.TestCase):
+    """主测试集。"""
 
-    def test_env_school_strawberry(self):
-        products = [p(n) for n in (
-            "草莓雪底红茶", "草莓冰淇淋雪底拿铁", "草莓冰淇淋雪底美式",
-            "草莓雪底茉莉绿茶", "草莓黑武士·筒甜", "草莓·筒甜",
-            "草莓味旗杆圣代", "黑武士·草莓味甜筒", "草莓味圣代",
-            "草莓味甜筒", "草莓味阿芙佳朵", "草莓吐冰",
-            "原味伯爵瑞士卷-单个(口味随机)",
-        )]
-        info = icf.detect_flavors(products)
-        self.assertEqual(info["flavors"], ["草莓"])
-        self.assertEqual(len(info["items"]), 12)
+    # ------------------------------------------------------------------
+    # 1. 核心要求：5x5 = 25 种口味组合
+    # ------------------------------------------------------------------
+    def test_all_25_flavor_combinations(self):
+        """遍历搭配表的 25 个元素，逐个元素验证两个变量与各自的输出。"""
+        self.assertEqual(len(FLAVOR_COMBINATIONS), 25)
 
-    def test_no_ice_cream(self):
-        info = icf.detect_flavors([p("美式"), p("拿铁咖啡"), p("原味酸奶碗")])
-        self.assertEqual(info["flavors"], [])
-        self.assertEqual(info["items"], [])
+        for index, pair in enumerate(FLAVOR_COMBINATIONS, 1):
+            main_flavor, huan_flavor = pair
+            with self.subTest(序号=index, 主图=main_flavor, 环院=huan_flavor):
+                datasets = {
+                    AID_ZHUTU: ZHUTU_TEMPLATES[main_flavor] + NOISE_PRODUCTS,
+                    AID_HUANYUAN: HUANYUAN_TEMPLATES[huan_flavor] + NOISE_PRODUCTS,
+                }
+                main_flavors, huan_flavors = query_both(opener=make_opener(datasets))
 
-    def test_non_icecream_products_are_ignored(self):
-        # 「原味伯爵瑞士卷」不含冰淇淋关键词，不应计入
-        info = icf.detect_flavors([p("原味伯爵瑞士卷-单个(口味随机)")])
-        self.assertEqual(info["flavors"], [])
+                # 两个变量各自独立、互不串味
+                self.assertEqual(main_flavors, [main_flavor])
+                self.assertEqual(huan_flavors, [huan_flavor])
+                self.assertIsNot(main_flavors, huan_flavors)
 
-    def test_flavor_is_taken_directly_without_voting(self):
-        # 同一天口味一致：即使某口味只出现在一个商品上也应被采用
-        products = [p(n) for n in ("抹茶圣代", "抹茶甜筒", "香草圣代")]
-        info = icf.detect_flavors(products)
-        self.assertEqual(info["flavors"], ["抹茶", "香草"])
+                # 该元素自己的输出
+                self.assertEqual(
+                    format_line(main_flavors, huan_flavors),
+                    f"主图：{main_flavor}冰淇淋，环院：{huan_flavor}冰淇淋",
+                )
+                self.assertEqual(render_combination(pair),
+                                 format_line(main_flavors, huan_flavors))
 
-    def test_flavors_are_deduplicated_in_order(self):
-        products = [p("香草圣代"), p("香草甜筒"), p("草莓圣代"), p("香草阿芙佳朵")]
-        info = icf.detect_flavors(products)
-        self.assertEqual(info["flavors"], ["香草", "草莓"])
+    def test_25_combinations_with_single_product_each(self):
+        """极简场景：每个站点当天只有 1 个冰淇淋商品，也要能正确识别。"""
+        checked = 0
+        for zhutu_flavor in FLAVORS:
+            for huanyuan_flavor in FLAVORS:
+                datasets = {
+                    AID_ZHUTU: [f"{zhutu_flavor}·筒甜", "拿铁咖啡"],
+                    AID_HUANYUAN: [f"{huanyuan_flavor}味甜筒", "美式"],
+                }
+                main_flavors, huan_flavors = query_both(opener=make_opener(datasets))
+                self.assertEqual(main_flavors, [zhutu_flavor])
+                self.assertEqual(huan_flavors, [huanyuan_flavor])
+                checked += 1
+        self.assertEqual(checked, 25)
 
-    def test_blank_and_missing_names(self):
-        info = icf.detect_flavors([{"name": ""}, {}, {"name": None}, p("香草圣代")])
-        self.assertEqual(info["flavors"], ["香草"])
+    def test_25_combinations_with_real_snapshot_shape(self):
+        """把 25 种组合混入真实快照，验证不被真实噪声商品干扰。"""
+        for zhutu_flavor in FLAVORS:
+            for huanyuan_flavor in FLAVORS:
+                datasets = {
+                    AID_ZHUTU: SNAPSHOT_ZHUTU + ZHUTU_TEMPLATES[zhutu_flavor],
+                    AID_HUANYUAN: SNAPSHOT_HUANYUAN + HUANYUAN_TEMPLATES[huanyuan_flavor],
+                }
+                main_flavors, huan_flavors = query_both(opener=make_opener(datasets))
+                self.assertIn(zhutu_flavor, main_flavors)
+                self.assertIn(huanyuan_flavor, huan_flavors)
 
+    # ------------------------------------------------------------------
+    # 2. 真实快照
+    # ------------------------------------------------------------------
+    def test_real_snapshot_zhutu(self):
+        """2026-09 的真实快照：交图创咖当天是香草。"""
+        self.assertEqual(extract_flavors(SNAPSHOT_ZHUTU), ["香草"])
 
-class TestFlavorWhitelist(unittest.TestCase):
-    """FLAVORS 只认指定的五种口味。"""
+    def test_real_snapshot_huanyuan(self):
+        """2026-09 的真实快照：交环创咖当天是草莓。"""
+        self.assertEqual(extract_flavors(SNAPSHOT_HUANYUAN), ["草莓"])
 
-    def test_exact_flavor_list(self):
-        self.assertEqual(
-            list(icf.FLAVORS),
-            ["香草", "草莓", "巧克力", "抹茶", "茉莉乌龙"],
-        )
+    # ------------------------------------------------------------------
+    # 3. 命名变体与口味别名
+    # ------------------------------------------------------------------
+    def test_every_flavor_naming_variant(self):
+        """每一种命名模板都能被识别成对应口味。"""
+        for flavor in FLAVORS:
+            for name in ZHUTU_TEMPLATES[flavor] + HUANYUAN_TEMPLATES[flavor]:
+                with self.subTest(口味=flavor, 商品=name):
+                    self.assertEqual(detect_flavors_from_name(name), [flavor])
 
-    def test_each_allowed_flavor_is_detected(self):
-        for flavor in ("香草", "草莓", "巧克力", "抹茶", "茉莉乌龙"):
-            with self.subTest(flavor=flavor):
-                info = icf.detect_flavors([p(flavor + "圣代")])
-                self.assertEqual(info["flavors"], [flavor])
+    def test_flavor_aliases(self):
+        """茉莉乌龙允许写成 乌龙 / 茉莉。"""
+        self.assertEqual(detect_flavors_from_name("乌龙味甜筒"), ["茉莉乌龙"])
+        self.assertEqual(detect_flavors_from_name("茉莉乌龙味甜筒"), ["茉莉乌龙"])
+        self.assertEqual(detect_flavors_from_name("茉莉味圣代"), ["茉莉乌龙"])
 
-    def test_removed_flavors_are_ignored(self):
-        for flavor in ("芒果", "蓝莓", "焦糖", "榴莲", "奥利奥", "芝士", "原味"):
-            with self.subTest(flavor=flavor):
-                info = icf.detect_flavors([p(flavor + "圣代")])
-                self.assertEqual(info["flavors"], [], f"{flavor} 不该再被识别")
+    def test_tea_base_is_not_flavor(self):
+        """特征词之后的茶底不算口味："香草雪底茉莉绿茶" 只能是香草。"""
+        self.assertEqual(detect_flavors_from_name("香草雪底茉莉绿茶"), ["香草"])
+        self.assertEqual(detect_flavors_from_name("草莓雪底红茶"), ["草莓"])
+        self.assertEqual(detect_flavors_from_name("草莓冰淇淋雪底拿铁"), ["草莓"])
+        self.assertEqual(detect_flavors_from_name("草莓冰淇淋雪底美式"), ["草莓"])
 
-    def test_moli_oolong_needs_full_match(self):
-        # 只写「茉莉」不足，必须是完整的「茉莉乌龙」
-        info = icf.detect_flavors([p("茉莉乌龙甜筒")])
-        self.assertEqual(info["flavors"], ["茉莉乌龙"])
+    def test_ice_cream_prefix(self):
+        self.assertEqual(ice_cream_prefix("香草冰淇淋雪底拿铁"), "香草")
+        self.assertEqual(ice_cream_prefix("黑武士·草莓味甜筒"), "黑武士·草莓味")
+        self.assertIsNone(ice_cream_prefix("香草拿铁"))
+        self.assertIsNone(ice_cream_prefix(""))
+        self.assertIsNone(ice_cream_prefix("桂花乌龙炖桃胶"))
 
-    def test_moli_green_tea_is_not_a_flavor(self):
-        info = icf.detect_flavors([p("茉莉绿茶圣代")])
-        self.assertEqual(info["flavors"], [])
+    def test_shortest_marker_wins(self):
+        """同时命中多个特征词时，取位置最靠前的那个作为分界。"""
+        # "草莓·筒甜" 里 "筒甜" 位置为 3，前缀应为 "草莓·"
+        self.assertEqual(ice_cream_prefix("草莓·筒甜"), "草莓·")
+        self.assertEqual(detect_flavors_from_name("草莓·筒甜"), ["草莓"])
 
-    def test_real_shop_menu_names(self):
-        """两家店真实在售的冰淇淋商品名仍要正确识别。"""
-        main = [p(n) for n in (
-            "香草冰淇淋雪底拿铁", "香草冰淇淋雪底美式", "香草·筒甜",
-            "香草黑武士·筒甜", "香草雪底茉莉绿茶", "香草阿芙佳朵",
-            "香草旗杆圣代", "香草圣代", "香草吐冰",
-        )]
-        huan = [p(n) for n in (
-            "草莓雪底红茶", "草莓冰淇淋雪底拿铁", "草莓冰淇淋雪底美式",
-            "草莓雪底茉莉绿茶", "草莓黑武士·筒甜", "草莓·筒甜",
-            "草莓味旗杆圣代", "黑武士·草莓味甜筒", "草莓味圣代",
-            "草莓味甜筒", "草莓味阿芙佳朵", "草莓吐冰",
-        )]
-        self.assertEqual(icf.detect_flavors(main)["flavors"], ["香草"])
-        self.assertEqual(icf.detect_flavors(huan)["flavors"], ["草莓"])
+    # ------------------------------------------------------------------
+    # 4. 噪声商品必须被忽略
+    # ------------------------------------------------------------------
+    def test_noise_products_ignored(self):
+        self.assertEqual(extract_flavors(NOISE_PRODUCTS), [])
 
+    def test_noise_with_each_flavor(self):
+        """每种口味的冰淇淋商品 + 全部噪声，只能识别出那一种口味。"""
+        for flavor in FLAVORS:
+            with self.subTest(口味=flavor):
+                self.assertEqual(
+                    extract_flavors([f"{flavor}冰淇淋雪底拿铁"] + NOISE_PRODUCTS),
+                    [flavor],
+                )
 
-class TestFormatResult(unittest.TestCase):
-    def test_one_shop_per_line_without_comma(self):
-        results = {
-            "主图": {"flavors": ["香草"]},
-            "环院": {"flavors": ["草莓"]},
+    # ------------------------------------------------------------------
+    # 5. 边界情况
+    # ------------------------------------------------------------------
+    def test_no_ice_cream_at_all(self):
+        """当天没上冰淇淋。"""
+        datasets = {AID_ZHUTU: NOISE_PRODUCTS, AID_HUANYUAN: ["拿铁", "美式"]}
+        main_flavors, huan_flavors = query_both(opener=make_opener(datasets))
+        self.assertEqual(main_flavors, [])
+        self.assertEqual(huan_flavors, [])
+        self.assertEqual(format_line(main_flavors, huan_flavors),
+                         "主图：无冰淇淋，环院：无冰淇淋")
+
+    def test_multiple_flavors_same_day(self):
+        """当天同时卖两种口味时全部列出。"""
+        datasets = {
+            AID_ZHUTU: ["香草·筒甜", "草莓味甜筒"],
+            AID_HUANYUAN: ["抹茶圣代"],
         }
+        main_flavors, huan_flavors = query_both(opener=make_opener(datasets))
+        self.assertEqual(main_flavors, ["香草", "草莓"])
+        self.assertEqual(format_line(main_flavors, huan_flavors),
+                         "主图：香草、草莓冰淇淋，环院：抹茶冰淇淋")
+
+    def test_flavor_order_is_stable(self):
+        """输出顺序固定按 FLAVORS，与商品出现顺序无关。"""
         self.assertEqual(
-            icf.format_result(results, icf.SHOPS),
-            "主图：香草冰淇淋\n环院：草莓冰淇淋",
+            extract_flavors(["茉莉乌龙·筒甜", "巧克力圣代", "抹茶味甜筒",
+                             "草莓·筒甜", "香草圣代"]),
+            ["香草", "草莓", "抹茶", "巧克力", "茉莉乌龙"],
         )
-        self.assertNotIn("，", icf.format_result(results, icf.SHOPS))
 
-    def test_multiple_flavors_joined(self):
-        results = {"主图": {"flavors": ["香草", "草莓"]}, "环院": {"flavors": ["抹茶"]}}
+    def test_describe_and_format(self):
+        self.assertEqual(describe(["香草"]), "香草冰淇淋")
+        self.assertEqual(describe([]), "无冰淇淋")
+        self.assertEqual(describe(None), "未知")
+        self.assertEqual(format_line(None, ["草莓"]), "主图：未知，环院：草莓冰淇淋")
+
+    def test_two_variables_are_independent(self):
+        """两个变量互不影响：改其中一个不会影响另一个。"""
+        datasets = {AID_ZHUTU: ["香草·筒甜"], AID_HUANYUAN: ["草莓·筒甜"]}
+        main_flavors, huan_flavors = query_both(opener=make_opener(datasets))
+        main_flavors.append("抹茶")
+        self.assertEqual(huan_flavors, ["草莓"])
+
+    # ------------------------------------------------------------------
+    # 6. 接口地址与翻页
+    # ------------------------------------------------------------------
+    def test_build_url_matches_given_links(self):
         self.assertEqual(
-            icf.format_result(results, icf.SHOPS),
-            "主图：香草冰淇淋、草莓冰淇淋\n环院：抹茶冰淇淋",
+            build_url(32677668, 1),
+            "https://m.yk.fkw.com/api/product/list?aid=32677668&yid=1&storeId=0"
+            "&page=1&limit=200&vers=20260902&__from=1",
         )
-
-    def test_missing_flavor_placeholder(self):
-        results = {"主图": {"flavors": []}, "环院": {"flavors": ["草莓"]}}
         self.assertEqual(
-            icf.format_result(results, icf.SHOPS),
-            "主图：未找到冰淇淋商品\n环院：草莓冰淇淋",
+            build_url(32822471, 2),
+            "https://m.yk.fkw.com/api/product/list?aid=32822471&yid=1&storeId=0"
+            "&page=2&limit=200&vers=20260902&__from=1",
         )
 
-    def test_fetch_error_is_shown(self):
-        results = {
-            "主图": {"flavors": [], "error": "连接超时"},
-            "环院": {"flavors": ["草莓"], "error": None},
-        }
-        self.assertEqual(
-            icf.format_result(results, icf.SHOPS),
-            "主图：获取失败（连接超时）\n环院：草莓冰淇淋",
+    def test_pagination_multi_page(self):
+        """超过 200 条时要翻页，第 2 页里的口味不能被漏掉。"""
+        names = [f"普通商品{i}" for i in range(205)]
+        names.append("香草·筒甜")           # 落在第 2 页
+        calls = []
+        got = fetch_all_product_names(AID_ZHUTU, opener=make_opener({AID_ZHUTU: names}, calls))
+        self.assertEqual(len(got), 206)
+        self.assertEqual(extract_flavors(got), ["香草"])
+        self.assertEqual(calls, [(AID_ZHUTU, 1), (AID_ZHUTU, 2)])
+
+    def test_pagination_stops_at_short_page(self):
+        """不足一页时不再请求第 2 页。"""
+        calls = []
+        got = fetch_all_product_names(
+            AID_ZHUTU,
+            opener=make_opener({AID_ZHUTU: ["香草·筒甜", "美式"]}, calls),
         )
+        self.assertEqual(got, ["香草·筒甜", "美式"])
+        self.assertEqual(calls, [(AID_ZHUTU, 1)])
 
+    def test_pagination_empty_store(self):
+        calls = []
+        got = fetch_all_product_names(AID_ZHUTU, opener=make_opener({}, calls))
+        self.assertEqual(got, [])
+        self.assertEqual(calls, [(AID_ZHUTU, 1)])
 
-class TestVisibleOutput(unittest.TestCase):
-    """双击运行时必须能看到输出：窗口结束前要暂停。"""
+    # ------------------------------------------------------------------
+    # 7. 异常处理
+    # ------------------------------------------------------------------
+    def test_api_error_code_raises(self):
+        def opener(url, timeout=None):
+            return {"code": 500, "msg": "boom", "dataList": []}
 
-    def test_pause_can_be_disabled(self):
-        # 不能阻塞：disable=True 时必须立即返回
-        icf._maybe_pause(disable=True)
+        with self.assertRaises(RuntimeError):
+            fetch_all_product_names(AID_ZHUTU, opener=opener, retries=0)
 
-    def test_pause_skipped_by_env_var(self):
-        os.environ[icf.PAUSE_ENV] = "1"
+    def test_network_failure_after_retries(self):
+        attempts = []
+
+        def opener(url, timeout=None):
+            attempts.append(url)
+            raise OSError("网络不可达")
+
+        with self.assertRaises(RuntimeError):
+            fetch_all_product_names(AID_ZHUTU, opener=opener, retries=1)
+        self.assertEqual(len(attempts), 2, "失败后应重试一次")
+
+    def test_one_site_down_does_not_break_the_other(self):
+        """一个站点挂了，另一个照常返回，挂掉的那个是 None。"""
+
+        def opener(url, timeout=None):
+            if f"aid={AID_HUANYUAN}" in url:
+                raise OSError("环院接口不可达")
+            return {"code": 0, "dataList": [{"name": "香草·筒甜"}]}
+
+        main_flavors, huan_flavors = query_both(opener=opener)
+        self.assertEqual(main_flavors, ["香草"])
+        self.assertIsNone(huan_flavors)
+        self.assertEqual(format_line(main_flavors, huan_flavors),
+                         "主图：香草冰淇淋，环院：未知")
+
+    def test_main_returns_nonzero_when_site_down(self):
+        def opener(url, timeout=None):
+            if f"aid={AID_ZHUTU}" in url:
+                raise OSError("主图接口不可达")
+            return {"code": 0, "dataList": [{"name": "草莓·筒甜"}]}
+
+        # 注入假 opener 后跑 main（把模块内的 http_get_json 换掉）
+        original = icf.http_get_json
+        icf.http_get_json = lambda url, timeout=icf.TIMEOUT: opener(url)
         try:
-            icf._maybe_pause()
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = icf.main([])
         finally:
-            del os.environ[icf.PAUSE_ENV]
-
-    def test_double_click_detection_returns_bool(self):
-        self.assertIsInstance(icf._launched_by_double_click(), bool)
-
-    def test_double_click_detection_false_in_test_run(self):
-        # 测试由 python.exe / py.exe 启动，不是资源管理器双击
-        self.assertFalse(icf._launched_by_double_click())
-
-    def test_console_setup_is_safe(self):
-        icf._setup_console()  # 不应抛异常
-
-    def test_parent_process_name_is_string(self):
-        self.assertIsInstance(icf._parent_process_name(), str)
-
-    def test_ancestors_is_list(self):
-        self.assertIsInstance(icf._process_ancestors(), list)
-
-    # --- 祖先链判定 ---
-
-    def _with_ancestors(self, names, func):
-        orig = icf._process_ancestors
-        icf._process_ancestors = lambda limit=5: list(names)
-        try:
-            return func()
-        finally:
-            icf._process_ancestors = orig
-
-    def test_double_click_via_python_directly(self):
-        # .py 直接关联 python.exe：explorer.exe -> python.exe
-        self.assertTrue(
-            self._with_ancestors(["python.exe", "explorer.exe"],
-                                 icf._launched_by_double_click)
-        )
-
-    def test_double_click_via_py_launcher(self):
-        # .py 关联 py 启动器：explorer.exe -> py.exe -> python.exe
-        self.assertTrue(
-            self._with_ancestors(["py.exe", "explorer.exe"],
-                                 icf._launched_by_double_click)
-        )
-
-    def test_terminal_run_is_not_double_click(self):
-        # 从终端运行：python.exe -> powershell.exe -> ...（更上面才是 explorer）
-        self.assertFalse(
-            self._with_ancestors(["python.exe", "powershell.exe", "explorer.exe"],
-                                 icf._launched_by_double_click)
-        )
-
-    def test_cmd_run_is_not_double_click(self):
-        self.assertFalse(
-            self._with_ancestors(["python.exe", "cmd.exe"], icf._launched_by_double_click)
-        )
-
-    def test_unknown_ancestors_default_to_no_pause(self):
-        self.assertFalse(self._with_ancestors([], icf._launched_by_double_click))
-        self.assertFalse(
-            self._with_ancestors(["python.exe"], icf._launched_by_double_click)
-        )
-
-    # --- 暂停行为 ---
-
-    def test_pause_waits_when_launched_from_explorer(self):
-        """模拟双击：必须等待用户回车，否则窗口会一闪而过。"""
-        prompts = []
-        orig_anc, orig_input = icf._process_ancestors, builtins.input
-        icf._process_ancestors = lambda limit=5: ["py.exe", "explorer.exe"]
-        builtins.input = lambda prompt="": prompts.append(prompt)
-        try:
-            icf._maybe_pause()
-        finally:
-            icf._process_ancestors, builtins.input = orig_anc, orig_input
-        self.assertEqual(len(prompts), 1, "双击启动时没有暂停，窗口会一闪而过")
-
-    def test_force_pause_flag(self):
-        """--pause 强制暂停（供 .bat 调用）。"""
-        prompts = []
-        orig_input = builtins.input
-        builtins.input = lambda prompt="": prompts.append(prompt)
-        try:
-            icf._maybe_pause(force=True)
-        finally:
-            builtins.input = orig_input
-        self.assertEqual(len(prompts), 1)
-
-    def test_no_pause_flag_beats_force(self):
-        prompts = []
-        orig_input = builtins.input
-        builtins.input = lambda prompt="": prompts.append(prompt)
-        try:
-            icf._maybe_pause(force=True, disable=True)
-        finally:
-            builtins.input = orig_input
-        self.assertEqual(prompts, [])
-
-    def test_pause_survives_eof(self):
-        """用户直接关掉输入时不应崩溃。"""
-        orig_anc, orig_input = icf._process_ancestors, builtins.input
-        icf._process_ancestors = lambda limit=5: ["explorer.exe"]
-
-        def boom(prompt=""):
-            raise EOFError
-
-        builtins.input = boom
-        try:
-            icf._maybe_pause()
-        finally:
-            icf._process_ancestors, builtins.input = orig_anc, orig_input
-
-    # --- 端到端（mock 掉网络） ---
-
-    def test_main_runs_offline_and_prints_expected_line(self):
-        """参数解析、输出格式、退出码都要正确。"""
-        fixtures = {"主图": [p("香草圣代")], "环院": [p("草莓甜筒"), p("草莓阿芙佳朵")]}
-        orig = icf.fetch_products
-        icf.fetch_products = lambda shop, **kw: fixtures[shop["key"]]
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                code = icf.main(["--no-pause"])
-        finally:
-            icf.fetch_products = orig
-        self.assertEqual(code, 0)
-        self.assertEqual(buf.getvalue().strip(), "主图：香草冰淇淋\n环院：草莓冰淇淋")
-
-    def test_main_reports_error_instead_of_crashing(self):
-        """接口失败时要打印可读信息并以非 0 退出，而不是抛异常关窗。"""
-
-        def boom(shop, **kw):
-            raise icf.FetchError("模拟网络故障")
-
-        orig = icf.fetch_products
-        icf.fetch_products = boom
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                code = icf.main(["--no-pause"])
-        finally:
-            icf.fetch_products = orig
+            icf.http_get_json = original
         self.assertEqual(code, 1)
-        self.assertIn("获取失败（模拟网络故障）", buf.getvalue())
+        self.assertIsNone(icf.main_flavors)
+        self.assertEqual(icf.huan_flavors, ["草莓"])
+
+    def test_module_level_variables_exist(self):
+        """查询结果保存在两个独立的模块级变量里。"""
+        self.assertTrue(hasattr(icf, "main_flavors"))
+        self.assertTrue(hasattr(icf, "huan_flavors"))
+
+    # ------------------------------------------------------------------
+    # 8. 文档示例
+    # ------------------------------------------------------------------
+    def test_doctests(self):
+        results = doctest.testmod(icf, verbose=False)
+        self.assertEqual(results.failed, 0, f"{results.failed} 个 doctest 失败")
 
 
-class TestShopConfig(unittest.TestCase):
-    def test_two_shops_configured(self):
-        keys = [s["key"] for s in icf.SHOPS]
-        self.assertEqual(keys, ["主图", "环院"])
-        for shop in icf.SHOPS:
-            self.assertTrue(shop["appid"].startswith("wx"))
-            self.assertIsInstance(shop["aid"], int)
-            self.assertGreater(shop["aid"], 0)
+class CombinationTableTest(unittest.TestCase):
+    """5x5 = 25 元素搭配表本身的测试。"""
+
+    # ------------------------------------------------------------------
+    # 表结构
+    # ------------------------------------------------------------------
+    def test_table_shape(self):
+        """至少 25 个元素，每个元素恰好两个变量，且都是合法口味。"""
+        self.assertGreaterEqual(len(FLAVOR_COMBINATIONS), 25)
+        self.assertEqual(len(FLAVOR_COMBINATIONS), COMBINATION_COUNT)
+        self.assertEqual(count_combinations(), 25)
+
+        for index, pair in enumerate(FLAVOR_COMBINATIONS):
+            with self.subTest(序号=index):
+                self.assertEqual(len(pair), 2, "每个元素必须含两个变量")
+                self.assertIsInstance(pair[0], str)
+                self.assertIsInstance(pair[1], str)
+                self.assertIn(pair[0], FLAVORS)
+                self.assertIn(pair[1], FLAVORS)
+
+    def test_table_is_full_cartesian_product(self):
+        """不重不漏：恰好等于 FLAVORS 的 5x5 笛卡尔积。"""
+        expected = [[main, huan] for main in FLAVORS for huan in FLAVORS]
+        self.assertEqual(FLAVOR_COMBINATIONS, expected)
+
+        pairs = [tuple(pair) for pair in FLAVOR_COMBINATIONS]
+        self.assertEqual(len(pairs), 25)
+        self.assertEqual(len(set(pairs)), 25, "不能有重复元素")
+
+    def test_explicit_examples_present(self):
+        """逐个检查需求里点名举例的搭配都在表中。"""
+        for pair in (["香草", "香草"], ["香草", "草莓"], ["香草", "抹茶"],
+                     ["香草", "巧克力"], ["香草", "茉莉乌龙"],
+                     ["草莓", "香草"], ["草莓", "草莓"],
+                     ["茉莉乌龙", "茉莉乌龙"]):
+            with self.subTest(搭配=pair):
+                self.assertIn(pair, FLAVOR_COMBINATIONS)
+
+    # ------------------------------------------------------------------
+    # 逐元素输出
+    # ------------------------------------------------------------------
+    def test_each_element_renders_its_own_line(self):
+        """25 个元素分别生成 25 行互不相同的输出。"""
+        lines = render_all_combinations()
+        self.assertEqual(len(lines), 25)
+        self.assertEqual(len(set(lines)), 25, "25 行必须互不相同")
+
+        for pair, line in zip(FLAVOR_COMBINATIONS, lines):
+            with self.subTest(搭配=pair):
+                self.assertEqual(line, f"主图：{pair[0]}冰淇淋，环院：{pair[1]}冰淇淋")
+
+        # 抽样对照
+        self.assertEqual(lines[0], "主图：香草冰淇淋，环院：香草冰淇淋")
+        self.assertEqual(lines[1], "主图：香草冰淇淋，环院：草莓冰淇淋")
+        self.assertEqual(lines[4], "主图：香草冰淇淋，环院：茉莉乌龙冰淇淋")
+        self.assertEqual(lines[6], "主图：草莓冰淇淋，环院：草莓冰淇淋")
+        self.assertEqual(lines[24], "主图：茉莉乌龙冰淇淋，环院：茉莉乌龙冰淇淋")
+
+    def test_render_combination_uses_both_variables(self):
+        self.assertEqual(render_combination(["香草", "香草"]),
+                         "主图：香草冰淇淋，环院：香草冰淇淋")
+        self.assertEqual(render_combination(["香草", "草莓"]),
+                         "主图：香草冰淇淋，环院：草莓冰淇淋")
+        self.assertEqual(render_combination(["茉莉乌龙", "巧克力"]),
+                         "主图：茉莉乌龙冰淇淋，环院：巧克力冰淇淋")
+
+    def test_render_all_accepts_custom_table(self):
+        custom = [["抹茶", "巧克力"], ["巧克力", "抹茶"]]
+        self.assertEqual(render_all_combinations(custom),
+                         ["主图：抹茶冰淇淋，环院：巧克力冰淇淋",
+                          "主图：巧克力冰淇淋，环院：抹茶冰淇淋"])
+
+    # ------------------------------------------------------------------
+    # 表自检与定位
+    # ------------------------------------------------------------------
+    def test_validate_combinations_accepts_default(self):
+        validate_combinations()          # 默认表必须通过，不抛异常
+
+    def test_validate_combinations_rejects_bad_tables(self):
+        full = [[main, huan] for main in FLAVORS for huan in FLAVORS]
+
+        with self.assertRaises(ValueError):      # 元素太少
+            validate_combinations([["香草", "草莓"]])
+        with self.assertRaises(ValueError):      # 缺一种组合
+            validate_combinations(full[:-1])
+        with self.assertRaises(ValueError):      # 元素不足两个变量
+            validate_combinations(full + [["香草"]])
+        with self.assertRaises(ValueError):      # 出现未知口味
+            validate_combinations(full + [["榴莲", "香草"]])
+
+    def test_find_combination(self):
+        self.assertEqual(find_combination(["香草"], ["草莓"]), (1, ["香草", "草莓"]))
+        self.assertEqual(find_combination(["茉莉乌龙"], ["茉莉乌龙"]),
+                         (24, ["茉莉乌龙", "茉莉乌龙"]))
+        self.assertIsNone(find_combination(["香草", "草莓"], ["抹茶"]))
+        self.assertIsNone(find_combination([], ["抹茶"]))
+        self.assertIsNone(find_combination(None, ["抹茶"]))
+
+    def test_every_flavor_pair_locates_in_table(self):
+        """任意一对口味都能在表中定位到唯一序号。"""
+        for main_flavor in FLAVORS:
+            for huan_flavor in FLAVORS:
+                with self.subTest(主图=main_flavor, 环院=huan_flavor):
+                    index, pair = find_combination([main_flavor], [huan_flavor])
+                    self.assertEqual(pair, [main_flavor, huan_flavor])
+                    self.assertEqual(FLAVOR_COMBINATIONS[index], pair)
+
+    # ------------------------------------------------------------------
+    # 命令行模式
+    # ------------------------------------------------------------------
+    def test_combinations_cli_prints_25_lines(self):
+        """--combinations 逐个打印 25 行。"""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            code = icf.main(["--combinations"])
+        self.assertEqual(code, 0)
+
+        lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 25)
+
+        for index, (line, pair) in enumerate(zip(lines, FLAVOR_COMBINATIONS), 1):
+            with self.subTest(序号=index):
+                stripped = line.strip()
+                self.assertTrue(stripped.startswith(f"{index}. "), line)
+                self.assertIn(f"主图={pair[0]} 环院={pair[1]}", line)
+                self.assertIn(f"主图：{pair[0]}冰淇淋，环院：{pair[1]}冰淇淋", line)
+
+    def test_combinations_cli_json(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            code = icf.main(["--combinations", "--json"])
+        self.assertEqual(code, 0)
+
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(len(payload), 25)
+        self.assertEqual([item["序号"] for item in payload], list(range(1, 26)))
+        self.assertEqual(payload[0]["主图"], "香草")
+        self.assertEqual(payload[0]["环院"], "香草")
+        self.assertEqual(payload[0]["line"], "主图：香草冰淇淋，环院：香草冰淇淋")
+        self.assertEqual(payload[24]["line"], "主图：茉莉乌龙冰淇淋，环院：茉莉乌龙冰淇淋")
+
+
+@unittest.skipUnless(os.environ.get("ICECREAM_LIVE_TEST") == "1",
+                     "需要 ICECREAM_LIVE_TEST=1 才跑真实联网测试")
+class LiveApiTest(unittest.TestCase):
+    """真实接口回归测试（默认跳过）。"""
+
+    def test_live_query(self):
+        main_flavors, huan_flavors = query_both(verbose=True)
+        print("主图：", main_flavors, " 环院：", huan_flavors)
+        for flavors in (main_flavors, huan_flavors):
+            self.assertIsNotNone(flavors)
+            for flavor in flavors:
+                self.assertIn(flavor, FLAVORS)
+        print(format_line(main_flavors, huan_flavors))
 
 
 if __name__ == "__main__":
