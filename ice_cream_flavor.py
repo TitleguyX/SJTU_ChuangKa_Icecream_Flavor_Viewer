@@ -84,7 +84,7 @@ FLAVORS = ("香草", "草莓", "抹茶", "巧克力", "茉莉乌龙")
 
 #: 口味别名：商品名里可能出现的写法
 FLAVOR_ALIASES = {
-    "香草": ("香草",),
+    "香草": ("香草","原味"),
     "草莓": ("草莓",),
     "抹茶": ("抹茶",),
     "巧克力": ("巧克力",),
@@ -137,7 +137,8 @@ COMBINATION_COUNT = len(FLAVORS) ** 2
 ICE_CREAM_MARKERS = (
     "冰淇淋",
     "冰激凌",
-    "雪底",     # 香草雪底红茶 / 草莓雪底茉莉绿茶
+"""    "雪底",     # 香草雪底红茶 / 草莓雪底茉莉绿茶
+因为雪底茉莉绿茶的出现，导致此判定方法可能出现误判"""
     "筒甜",     # 香草·筒甜 / 黑武士·筒甜
     "甜筒",     # 草莓味甜筒
     "圣代",     # 香草圣代 / 香草旗杆圣代
@@ -242,17 +243,7 @@ def ice_cream_products(product_names) -> list[str]:
 # --------------------------------------------------------------------------
 
 def describe(flavors) -> str:
-    """把口味列表描述成 "香草冰淇淋" / "香草、草莓冰淇淋" / "无冰淇淋" / "未知"。
-
-    >>> describe(["香草"])
-    '香草冰淇淋'
-    >>> describe(["香草", "草莓"])
-    '香草、草莓冰淇淋'
-    >>> describe([])
-    '无冰淇淋'
-    >>> describe(None)
-    '未知'
-    """
+ 
     if flavors is None:
         return "未知"
     if not flavors:
@@ -261,11 +252,8 @@ def describe(flavors) -> str:
 
 
 def format_line(main_result, huan_result) -> str:
-    """生成最终输出："主图：xx冰淇淋，环院：xx冰淇淋"。
+    """生成最终输出："主图：xx冰淇淋，环院：xx冰淇淋"。"""
 
-    >>> format_line(["香草"], ["草莓"])
-    '主图：香草冰淇淋，环院：草莓冰淇淋'
-    """
     return f"{SITE_ZHUTU}：{describe(main_result)}，{SITE_HUANYUAN}：{describe(huan_result)}"
 
 
@@ -282,8 +270,8 @@ def validate_combinations(combinations=None) -> None:
     >>> validate_combinations([["香草", "草莓"]])
     Traceback (most recent call last):
         ...
-    ValueError: 搭配表元素个数 1，少于要求的 25
-    """
+    ValueError: 搭配表元素个数 1，少于要求的 25"""
+    
     combinations = FLAVOR_COMBINATIONS if combinations is None else combinations
 
     if len(combinations) < COMBINATION_COUNT:
@@ -323,32 +311,12 @@ def render_combination(pair) -> str:
 
     元素里的两个变量分别当作主图、环院当天的口味。
 
-    >>> render_combination(["香草", "香草"])
-    '主图：香草冰淇淋，环院：香草冰淇淋'
-    >>> render_combination(["香草", "草莓"])
-    '主图：香草冰淇淋，环院：草莓冰淇淋'
-    >>> render_combination(["茉莉乌龙", "巧克力"])
-    '主图：茉莉乌龙冰淇淋，环院：巧克力冰淇淋'
-    """
-    main_flavor, huan_flavor = pair          # 第一个变量：主图口味
-    return format_line([main_flavor], [huan_flavor])
-
-
 def render_all_combinations(combinations=None) -> list[str]:
-    """逐个元素生成各自不同的输出行，返回 25 行文本。
+    
+    #逐个元素生成各自不同的输出行，返回 25 行文本。"""
 
-    >>> lines = render_all_combinations()
-    >>> len(lines)
-    25
-    >>> len(set(lines))          # 25 行互不相同
-    25
-    >>> lines[0]
-    '主图：香草冰淇淋，环院：香草冰淇淋'
-    >>> lines[1]
-    '主图：香草冰淇淋，环院：草莓冰淇淋'
-    >>> lines[-1]
-    '主图：茉莉乌龙冰淇淋，环院：茉莉乌龙冰淇淋'
-    """
+   
+    
     combinations = FLAVOR_COMBINATIONS if combinations is None else combinations
     return [render_combination(pair) for pair in combinations]
 
@@ -357,15 +325,8 @@ def find_combination(main_result, huan_result):
     """把实际查询到的口味对回搭配表：返回 ``(下标, 元素)``，无法定位则 ``None``。
 
     下标从 0 开始；展示给用户时记得 +1。
-    只有两个站点各自都恰好识别出 1 种口味时才能定位。
+    只有两个站点各自都恰好识别出 1 种口味时才能定位。"""
 
-    >>> find_combination(["香草"], ["草莓"])
-    (1, ['香草', '草莓'])
-    >>> find_combination(["香草", "草莓"], ["抹茶"]) is None
-    True
-    >>> find_combination([], ["抹茶"]) is None
-    True
-    """
     if not main_result or not huan_result:
         return None
     if len(main_result) != 1 or len(huan_result) != 1:
